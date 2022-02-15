@@ -1,35 +1,94 @@
-node {
-	def mavenHome
-        
-        stage('Code Checkout') { 
-		// Get code from a repository and Git has to be installed in the system; git must be configured in the Global Tool Configuration
-		git 'https://github.com/mitesh51/spring-petclinic.git'
-           
-		// Get the Maven tool configured in Global Tool Configuration 
-		// 'apache-maven-3.5.3' Maven tool must be configured in the global configuration.
-		mavenHome = tool 'apache-maven-3.5.3'
-        }
-        stage('Code Analysis') {
-                // Configure SonarQube Scanner in Manage Jenkins -> Global Tool Configuration
-                def scannerHome = tool 'SonarQube Scanner';
+pipeline {
+    agent any
 
-                // Sonarqube 7 must be configured in the Jenkins Manage Jenkins -> Configure System -> Add SonarQube server 
-                withSonarQubeEnv('Sonar7.1') {
-                        bat "${scannerHome}/bin/sonar-scanner -Dsonar.host.url=http://localhost:9000 -Dsonar.login=cb4e2ac86c60200796a7cf866c2a60955a505db2 -Dsonar.projectVersion=1.0 -Dsonar.projectKey=PetClinic_Key -Dsonar.sources=src -Dsonar.java.binaries=."
+    tools {
+        // Install the Maven version configured as "M3" and add it to the path.
+        maven "maven3"
+    }
+     environment {
+        NEXUS_VERSION = "nexus3"
+        NEXUS_PROTOCOL = "http"
+        NEXUS_URL = "192.168.31.117:8081"
+        NEXUS_REPOSITORY = "spring-petclinic"
+        NEXUS_CREDENTIAL_ID = "Nexus_credentails"
+    }
+    stages {
+	    stage('clone') {
+		   steps {
+		   git credentialsId: 'prakashchinni223', url: 'https://github.com/prakashchinni223/spring-petclinic.git'
+		   }
+		}
+        stage('Build') {
+            steps {
+                
+                sh "mvn clean package"
+
+            }
+          post {
+     
+                success {
+                    archiveArtifacts 'target/*.war'
+                    junit '**/target/surefire-reports/*.xml'
                 }
-        } 
-	stage('Build') {
-                // Execute shell script if OS flavor is Linux
-                if (isUnix()) {
-                        sh "'${mavenHome}/bin/mvn' -Dmaven.test.failure.ignore clean package"
-                        // Publish JUnit Report
-                        junit '**/target/surefire-reports/TEST-*.xml'
-                } 
-                else {
-                        // Execute Batch script if OS flavor is Windows		
-                        bat(/"${mavenHome}\bin\mvn" clean package/)
-                        // Publish JUnit Report
-                        junit '**/target/surefire-reports/TEST-*.xml'
+            }
+        }
+        
+        stage("publish to nexus") {
+            steps {
+                script {
+                    pom = readMavenPom file: "pom.xml";
+                    filesByGlob = findFiles(glob: "target/*.${pom.packaging}");
+                    echo "${filesByGlob[0].name} ${filesByGlob[0].path} ${filesByGlob[0].directory} ${filesByGlob[0].length} ${filesByGlob[0].lastModified}"
+                    artifactPath = filesByGlob[0].path;
+                    artifactExists = fileExists artifactPath;
+                    if(artifactExists) {
+                        echo "*** File: ${artifactPath}, group: ${pom.groupId}, packaging: ${pom.packaging}, version ${pom.version}";
+                        nexusArtifactUploader(
+                            nexusVersion: NEXUS_VERSION,
+                            protocol: NEXUS_PROTOCOL,
+                            nexusUrl: NEXUS_URL,
+                            groupId: pom.groupId,
+                            //version: '${BUILD_NUMBER}',
+                            version: pom.version,
+                            repository: NEXUS_REPOSITORY,
+                            credentialsId: NEXUS_CREDENTIAL_ID,
+                            artifacts: [
+                                [artifactId: pom.artifactId,
+                                classifier: '',
+                                file: artifactPath,
+                                type: pom.packaging],
+                                // Lets upload the pom.xml file for additional information for Transitive dependencies
+                                [artifactId: pom.artifactId,
+                                classifier: '',
+                                file: "pom.xml",
+                                type: "pom"]
+                            ]
+                        );
+                    } else {
+                        error "*** File: ${artifactPath}, could not be found";
+                    }
                 }
-	}
+            
+            }
+            
+        }
+        
+     stage("Deploy the war file in Tomcat")
+        {
+        steps
+            {
+                script{
+                    
+            withCredentials([usernameColonPassword(credentialsId: 'Nexus_credentails', variable: 'Nexus_cred')]) {
+    sh "curl -v -u $Nexus_cred $NEXUS_PROTOCOL://$NEXUS_URL/repository/$NEXUS_REPOSITORY/org/springframework/samples/$pom.artifactId/$pom.version/$pom.artifactId-$pom.version.$pom.packaging -o result.war"
+}
+            withCredentials([usernameColonPassword(credentialsId: 'tomcat_credentails', variable: 'tomcat_cred')])
+                       {
+             sh 'curl -v -u $tomcat_cred -T "result.war" "http://192.168.31.119:8080/manager/text/deploy?path=/petclinic&update=true"' 
+                        }
+                }
+            }
+        }    
+        
+    }
 }
